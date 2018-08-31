@@ -22,7 +22,8 @@ extraction:
       - "curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path -y"
 
     configure:
-      - "echo Deliberately not running cmake..."
+      command:
+        - "echo Deliberately not running cmake..."
       
     index:
       build_command:
