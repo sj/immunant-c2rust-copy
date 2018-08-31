@@ -14,6 +14,9 @@ extraction:
       version: 3
       setup_py: false
   cpp:
+    prepare:
+      packages:
+        - python3-psutil
     index:
       build_command:
         - scripts/build_translator.py
