@@ -9,8 +9,6 @@ path_classifiers:
 extraction:
   python:
     python_setup:
-      requirements_files:
-        - requirements.txt
       version: 3
       setup_py: false
   cpp:
