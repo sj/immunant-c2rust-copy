@@ -21,6 +21,9 @@ extraction:
     after_prepare:
       - "curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path -y"
 
+    configure:
+      - "echo Deliberately not running cmake..."
+      
     index:
       build_command:
         - "cat /usr/lib/python3/dist-packages/plumbum/__init__.py > /dev/null" # trick to install python3-plumbum
