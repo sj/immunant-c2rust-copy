@@ -5,6 +5,8 @@ path_classifiers:
     - cross-checks/c-checks/clang-plugin/test
     - cross-checks/rust-checks/rustc-plugin/tests
     - cross-checks/rust-checks/derive-macros/tests
+  library:
+    - dependencies
     
 extraction:
   python:
@@ -15,6 +17,11 @@ extraction:
     prepare:
       packages:
         - python3-psutil
+        
+    after_prepare:
+      - "curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path -y"
+
     index:
       build_command:
+        - "cat /usr/lib/python3/dist-packages/plumbum/__init__.py > /dev/null" # trick to install python3-plumbum
         - scripts/build_translator.py
