@@ -28,4 +28,4 @@ extraction:
     index:
       build_command:
         - "cat /usr/lib/python3/dist-packages/plumbum/__init__.py > /dev/null" # trick to install python3-plumbum
-        - scripts/build_translator.py
+        - "PATH=\"$HOME/.cargo/bin:$PATH\" scripts/build_translator.py"
