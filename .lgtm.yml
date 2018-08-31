@@ -10,7 +10,7 @@ extraction:
   python:
     python_setup:
       requirements_files:
-        - scripts/requirements.txt
+        - requirements.txt
       version: 3
       setup_py: false
   cpp:
