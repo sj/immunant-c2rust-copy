@@ -92,6 +92,7 @@ pub struct TranslationConfig {
     pub fail_on_error: bool,
     pub replace_unsupported_decls: ReplaceMode,
     pub translate_valist: bool,
+    pub reduce_type_annotations: bool,
 }
 
 pub struct Translation {
@@ -1796,7 +1797,7 @@ impl Translation {
                 if has_self_reference {
                     let pat_mut = mk().set_mutbl("mut").ident_pat(rust_name.clone());
                     let zeroed = self.implicit_default_expr(typ.ctype, is_static)?;
-                    let local_mut = mk().local(pat_mut, Some(ty.clone()), Some(zeroed));
+                    let local_mut = mk().local(pat_mut, Some(ty), Some(zeroed));
 
                     let assign = mk().assign_expr(mk().ident_expr(rust_name), init.val);
 
@@ -1819,7 +1820,14 @@ impl Translation {
 
                     let pat = mk().set_mutbl(mutbl).ident_pat(rust_name.clone());
 
-                    let local = mk().local(pat, Some(ty), Some(init.val.clone()));
+                    let type_annotation = if self.tcfg.reduce_type_annotations &&
+                                            !self.should_assign_type_annotation(typ.ctype, initializer) {
+                        None
+                    } else {
+                        Some(ty)
+                    };
+
+                    let local = mk().local(pat, type_annotation, Some(init.val.clone()));
                     let assign = mk().assign_expr(mk().ident_expr(rust_name), init.val);
 
                     let mut assign_stmts = stmts.clone();
@@ -1876,6 +1884,78 @@ impl Translation {
                     ))
                 }
             },
+        }
+    }
+
+    fn should_assign_type_annotation(&self, ctypeid: CTypeId, initializer: Option<CExprId>) -> bool {
+        let initializer_kind = initializer.map(|expr_id| &self.ast_context[expr_id].kind);
+
+        // If the RHS is a func call, we should be able to skip type annotation
+        // because we get a type from the function return type
+        if let Some(CExprKind::Call(_, _, _)) = initializer_kind {
+            return false;
+        }
+
+        match self.ast_context.resolve_type(ctypeid).kind {
+            CTypeKind::Pointer(CQualTypeId { ctype, .. }) => {
+                match self.ast_context.resolve_type(ctype).kind {
+                    CTypeKind::Function(_, _, _, _) => {
+                        // Fn pointers need to be type annotated if null
+                        if initializer.is_none() {
+                            return true;
+                        }
+
+                        // None assignments don't prove enough type information unless there are follow-up assignments
+                        if let Some(CExprKind::ImplicitCast(_, _, CastKind::NullToPointer, _)) = initializer_kind {
+                            return true;
+                        }
+
+                        // We could set this to false and skip non null fn ptr annotations. This will work
+                        // 99% of the time, however there is a strange case where fn ptr comparisons
+                        // complain PartialEq is not implemented for the type inferred function type,
+                        // but the identical type that is explicitly defined doesn't seem to have that issue
+                        // Probably a rustc bug. See https://github.com/rust-lang/rust/issues/53861
+                        true
+                    },
+                    _ => {
+                        // Non function null ptrs provide enough information to skip
+                        // type annotations; ie `= 0 as *const MyStruct;`
+                        if initializer.is_none() {
+                            return false;
+                        }
+
+                        if let Some(CExprKind::ImplicitCast(_, _, cast_kind, _)) = initializer_kind {
+                            match cast_kind {
+                                CastKind::NullToPointer => return false,
+                                CastKind::ConstCast => return true,
+                                _ => {},
+                            };
+                        }
+
+                        // ref decayed ptrs generally need a type annotation
+                        if let Some(CExprKind::Unary(_, c_ast::UnOp::AddressOf, _)) = initializer_kind {
+                            return true;
+                        }
+
+                        false
+                    },
+                }
+            },
+            // For some reason we don't seem to apply type suffixes when 0-initializing
+            // so type annotation is need for 0-init ints and floats at the moment, but
+            // they could be simplified in favor of type suffixes
+            CTypeKind::Bool | CTypeKind::Char | CTypeKind::SChar |
+            CTypeKind::Short | CTypeKind::Int | CTypeKind::Long | CTypeKind::LongLong |
+            CTypeKind::UChar | CTypeKind::UShort | CTypeKind::UInt | CTypeKind::ULong |
+            CTypeKind::ULongLong | CTypeKind::LongDouble | CTypeKind::Int128 |
+            CTypeKind::UInt128 => initializer.is_none(),
+            CTypeKind::Float | CTypeKind::Double => initializer.is_none(),
+            CTypeKind::Struct(_) |
+            CTypeKind::Union(_) |
+            CTypeKind::Enum(_) => false,
+            CTypeKind::Function(_, _, _, _) => unreachable!("Can't have a function directly as a type"),
+            CTypeKind::Typedef(_) => unreachable!("Typedef should be expanded though resolve_type"),
+            _ => true,
         }
     }
 
@@ -2422,12 +2502,13 @@ impl Translation {
                                 val: self.panic("Binary expression is not supposed to be used"),
                             })
                         } else {
-                            let WithStmts { val: lhs, stmts: lhs_stmts } = self.convert_expr(ExprUse::RValue, lhs, is_static, decay_ref)?;
-                            let WithStmts { val: rhs, stmts: rhs_stmts } = self.convert_expr(ExprUse::RValue, rhs, is_static, decay_ref)?;
+                            let WithStmts { val: lhs_val, stmts: lhs_stmts } = self.convert_expr(ExprUse::RValue, lhs, is_static, decay_ref)?;
+                            let WithStmts { val: rhs_val, stmts: rhs_stmts } = self.convert_expr(ExprUse::RValue, rhs, is_static, decay_ref)?;
 
                             stmts.extend(lhs_stmts);
                             stmts.extend(rhs_stmts);
-                            let val = self.convert_binary_operator(op, ty, type_id.ctype, lhs_type, rhs_type, lhs, rhs);
+                            let expr_ids = Some((lhs, rhs));
+                            let val = self.convert_binary_operator(op, ty, type_id.ctype, lhs_type, rhs_type, lhs_val, rhs_val, expr_ids);
 
                             Ok(WithStmts { stmts, val })
                         }
@@ -2799,15 +2880,18 @@ impl Translation {
                 let n = substmt_ids.len();
                 let result_id = substmt_ids[n - 1];
 
-                let expr_id = match self.ast_context[result_id].kind {
-                    CStmtKind::Expr(expr_id) => Ok(expr_id),
-                    ref s => Err(format!("Statement expression didn't end in an expression: {:?}", s)),
-                }?;
-
                 if self.tcfg.reloop_cfgs {
+
                     let name = format!("<stmt-expr_{:?}>", compound_stmt_id);
-                    let ret = cfg::ImplicitReturnType::StmtExpr(use_, expr_id, is_static);
-                    let mut stmts = self.convert_function_body(&name, &substmt_ids[0 .. (n-1)], ret)?;
+
+                    let mut stmts = match self.ast_context[result_id].kind {
+                        CStmtKind::Expr(expr_id) => {
+                            let ret = cfg::ImplicitReturnType::StmtExpr(use_, expr_id, is_static);
+                            self.convert_function_body(&name, &substmt_ids[0 .. (n-1)], ret)?
+                        }
+
+                        _ => self.convert_function_body(&name, &substmt_ids, cfg::ImplicitReturnType::Void)?,
+                    };
 
                     if let Some(stmt) = stmts.pop() {
                         match as_semi_return_stmt(&stmt) {
@@ -2838,10 +2922,18 @@ impl Translation {
                         stmts.append(&mut self.convert_stmt(substmt_id)?);
                     }
 
-                    let mut result = self.convert_expr(use_, expr_id, is_static, DecayRef::Default)?;
-                    stmts.append(&mut result.stmts);
-                    Ok(WithStmts { stmts, val: result.val })
+                    match self.ast_context[result_id].kind {
+                        CStmtKind::Expr(expr_id) => {
+                            let mut result = self.convert_expr(use_, expr_id, is_static, DecayRef::Default)?;
+                            stmts.append(&mut result.stmts);
+                            Ok(WithStmts { stmts, val: result.val })
+                        }
 
+                        _ => {
+                            stmts.append(&mut self.convert_stmt(result_id)?);
+                            Ok(WithStmts { stmts, val: self.panic("Void statement expression")})
+                        }
+                    }
                 }
             }
             _ => {
@@ -3681,7 +3773,7 @@ impl Translation {
             let lhs_type = self.convert_type(compute_lhs_ty.ctype)?;
             let lhs = mk().cast_expr(read, lhs_type.clone());
             let ty = self.convert_type(compute_res_ty.ctype)?;
-            let val = self.convert_binary_operator(bin_op, ty, compute_res_ty.ctype, compute_lhs_ty, rhs_ty, lhs, rhs);
+            let val = self.convert_binary_operator(bin_op, ty, compute_res_ty.ctype, compute_lhs_ty, rhs_ty, lhs, rhs, None);
 
             let is_enum_result = self.ast_context[self.ast_context.resolve_type_id(lhs_ty.ctype)].kind.is_enum();
             let result_type = self.convert_type(lhs_ty.ctype)?;
@@ -3778,13 +3870,13 @@ impl Translation {
                 let op = op.underlying_assignment().expect("Cannot convert non-assignment operator");
 
                 let val = if compute_lhs_type_id.ctype == initial_lhs_type_id.ctype {
-                    self.convert_binary_operator(op, ty, qtype.ctype, initial_lhs_type_id, rhs_type_id, read.clone(), rhs)
+                    self.convert_binary_operator(op, ty, qtype.ctype, initial_lhs_type_id, rhs_type_id, read.clone(), rhs, None)
                 } else {
                     let lhs_type = self.convert_type(compute_type.unwrap().ctype)?;
                     let write_type = self.convert_type(qtype.ctype)?;
                     let lhs = mk().cast_expr(read.clone(), lhs_type.clone());
                     let ty = self.convert_type(result_type_id.ctype)?;
-                    let val = self.convert_binary_operator(op, ty, result_type_id.ctype, compute_lhs_type_id, rhs_type_id, lhs, rhs);
+                    let val = self.convert_binary_operator(op, ty, result_type_id.ctype, compute_lhs_type_id, rhs_type_id, lhs, rhs, None);
 
                     let is_enum_result = self.ast_context[self.ast_context.resolve_type_id(qtype.ctype)].kind.is_enum();
                     let result_type = self.convert_type(qtype.ctype)?;
@@ -3857,6 +3949,7 @@ impl Translation {
         rhs_type: CQualTypeId,
         lhs: P<Expr>,
         rhs: P<Expr>,
+        lhs_rhs_ids: Option<(CExprId, CExprId)>,
     ) -> P<Expr> {
         let is_unsigned_integral_type = self.ast_context.index(ctype).kind.is_unsigned_integral_type();
 
@@ -3881,8 +3974,50 @@ impl Translation {
             c_ast::BinOp::ShiftRight => mk().binary_expr(BinOpKind::Shr, lhs, rhs),
             c_ast::BinOp::ShiftLeft => mk().binary_expr(BinOpKind::Shl, lhs, rhs),
 
-            c_ast::BinOp::EqualEqual => bool_to_int(mk().binary_expr(BinOpKind::Eq, lhs, rhs)),
-            c_ast::BinOp::NotEqual => bool_to_int(mk().binary_expr(BinOpKind::Ne, lhs, rhs)),
+            c_ast::BinOp::EqualEqual => {
+                // Using is_none method for null comparison means we don't have to
+                // rely on the PartialEq trait as much and is also more idiomatic
+                let expr = if let Some((lhs_expr_id, rhs_expr_id)) = lhs_rhs_ids {
+                    let fn_eq_null = self.ast_context.is_function_pointer(lhs_type.ctype) &&
+                                     self.ast_context.is_null_expr(rhs_expr_id);
+                    let null_eq_fn = self.ast_context.is_function_pointer(rhs_type.ctype) &&
+                                     self.ast_context.is_null_expr(lhs_expr_id);
+
+                    if fn_eq_null {
+                        mk().method_call_expr(lhs, "is_none", vec![] as Vec<P<Expr>>)
+                    } else if null_eq_fn {
+                        mk().method_call_expr(rhs, "is_none", vec![] as Vec<P<Expr>>)
+                    } else {
+                        mk().binary_expr(BinOpKind::Eq, lhs, rhs)
+                    }
+                } else {
+                    mk().binary_expr(BinOpKind::Eq, lhs, rhs)
+                };
+
+                bool_to_int(expr)
+            },
+            c_ast::BinOp::NotEqual => {
+                // Using is_some method for null comparison means we don't have to
+                // rely on the PartialEq trait as much and is also more idiomatic
+                let expr = if let Some((lhs_expr_id, rhs_expr_id)) = lhs_rhs_ids {
+                    let fn_eq_null = self.ast_context.is_function_pointer(lhs_type.ctype) &&
+                                     self.ast_context.is_null_expr(rhs_expr_id);
+                    let null_eq_fn = self.ast_context.is_function_pointer(rhs_type.ctype) &&
+                                     self.ast_context.is_null_expr(lhs_expr_id);
+
+                    if fn_eq_null {
+                        mk().method_call_expr(lhs, "is_some", vec![] as Vec<P<Expr>>)
+                    } else if null_eq_fn {
+                        mk().method_call_expr(rhs, "is_some", vec![] as Vec<P<Expr>>)
+                    } else {
+                        mk().binary_expr(BinOpKind::Ne, lhs, rhs)
+                    }
+                } else {
+                    mk().binary_expr(BinOpKind::Ne, lhs, rhs)
+                };
+
+                bool_to_int(expr)
+            },
             c_ast::BinOp::Less => bool_to_int(mk().binary_expr(BinOpKind::Lt, lhs, rhs)),
             c_ast::BinOp::Greater => bool_to_int(mk().binary_expr(BinOpKind::Gt, lhs, rhs)),
             c_ast::BinOp::GreaterEqual => bool_to_int(mk().binary_expr(BinOpKind::Ge, lhs, rhs)),
