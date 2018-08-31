@@ -1,0 +1,33 @@
+llvm.src/*
+llvm.build*
+*.tar.xz
+*.tar.xz.sig
+*.tar.gz
+.idea
+.vscode
+*.log
+# ignore rust build dirs everywhere
+**/target/
+**/dependencies/
+**/tests/
+*.pyc
+.vagrant
+**/compile_commands.json
+**/Cargo.lock
+.python-version
+
+# cross-checks
+/cross-checks/c-checks/clang-plugin/build
+/cross-checks/libfakechecks/*.o
+/cross-checks/libfakechecks/*.so
+
+# tests
+!tests
+tests/*.rs
+tests/*.a
+tests/*.json
+tests/*.cbor
+tests/*_c
+tests/*_rust
+tests/*_c.txt
+tests/*_rust.txt

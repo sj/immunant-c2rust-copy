@@ -1,0 +1,15 @@
+[package]
+name = "cross-check-runtime"
+version = "0.1.0"
+authors = ["Andrei Homescu <ah@immunant.com>"]
+readme = "README.md"
+
+[features]
+xcheck-with-dlsym = []
+xcheck-with-weak = []
+djb2-ssse3 = ["simd"]
+libc-hash = []
+fixed-length-array-hash = []
+
+[dependencies]
+simd = { version = "0.2.0", optional = true }

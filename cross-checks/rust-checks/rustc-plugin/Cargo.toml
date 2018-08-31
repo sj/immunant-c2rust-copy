@@ -1,0 +1,20 @@
+[package]
+name = "cross-check-plugin"
+version = "0.1.0"
+authors = ["Andrei Homescu <ah@immunant.com>"]
+readme = "README.md"
+
+[lib]
+plugin = true
+
+[features]
+expand-macros = []
+c-hash-functions = []
+
+[dependencies]
+matches = "0.1.6"
+cross-check-config = { path = "../config", features = ["parse-syntax", "scopes"] }
+
+[dev-dependencies]
+cross-check-derive = { path = "../derive-macros" }
+cross-check-runtime = { path = "../runtime" }
