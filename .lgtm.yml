@@ -5,6 +5,7 @@ path_classifiers:
     - cross-checks/c-checks/clang-plugin/test
     - cross-checks/rust-checks/rustc-plugin/tests
     - cross-checks/rust-checks/derive-macros/tests
+    
 extraction:
   python:
     python_setup:
@@ -13,11 +14,6 @@ extraction:
       version: 3
       setup_py: false
   cpp:
-    # prepare:
-    after_prepare:
-      - sudo scripts/provision_deb.sh
     index:
       build_command:
         - scripts/build_translator.py
-  exclude:
-    - dependencies/**
